@@ -8,11 +8,11 @@
 #include <rosidl_runtime_c/string_functions.h>
 #include <rmw_microros/rmw_microros.h>
 
-#include <sensor_msgs/msg/imu.h>
-#include <geometry_msgs/msg/quaternion.h>
+#include <geometry_msgs/msg/accel_stamped.h>
 #include "MPU6050.h"
 #include <Wire.h>
 #include <math.h>
+#include <string>
 
 MPU6050 imu_;
 int16_t ax_, ay_, az_;
@@ -21,12 +21,13 @@ double pitch_ = 0;
 double roll_ = 0;
 double yaw_ = 0;
 double prev_time_ = 0;
+HardwareSerial SerialDebug(2);
 const double g_ = 9.80665;
-const unsigned int callback_duration_ms_ = 33; // up to 30hz ????
+const unsigned int callback_duration_ms_ = 14; // given lage size msg, callback cannot be finished within that time
 const char* ros_node_name_ = "mpu6050";
-const char* ros_namespace_ = "imu";
+const char* ros_namespace_ = "gyro";
 rcl_publisher_t publisher_;
-sensor_msgs__msg__Imu imu_msg_;
+geometry_msgs__msg__AccelStamped msg_;
 rclc_executor_t executor_;
 rclc_support_t support_;
 rcl_allocator_t allocator_;
@@ -37,6 +38,12 @@ rcl_clock_t ros_clock_;
 rcl_ret_t rc_;
 
 #define LED_PIN 13
+#define I2C_SDA 21
+#define I2C_SCL 22
+#define UART_RX 16
+#define UART_TX 17
+#define SERIAL_RATE 921600
+#define I2C_FREQ 400000
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
@@ -56,36 +63,35 @@ void timer_callback(rcl_timer_t * timer_, int64_t last_call_time)
   
     int64_t time_ns = rmw_uros_epoch_nanos();
     double cur_time = (double)time_ns / 1000000000.0;
-    double dt = cur_time - prev_time_;
-    imu_msg_.header.stamp.sec = (int32_t)(cur_time);
-    imu_msg_.header.stamp.nanosec = (uint32_t)(time_ns % 1000000000);
+    msg_.header.stamp.sec = (int32_t)(cur_time);
+    msg_.header.stamp.nanosec = (uint32_t)(time_ns % 1000000000);
     
-    imu_msg_.linear_acceleration.x = rawacc2radsacc(ax_); 
-    imu_msg_.linear_acceleration.y = rawacc2radsacc(ay_);
-    imu_msg_.linear_acceleration.z = rawacc2radsacc(az_);
+    msg_.accel.linear.x = rawacc2radsacc(ax_); 
+    msg_.accel.linear.y = rawacc2radsacc(ay_);
+    msg_.accel.linear.z = rawacc2radsacc(az_);
 
-    imu_msg_.angular_velocity.x = rawgyr2radsgyr(gx_);
-    imu_msg_.angular_velocity.y = rawgyr2radsgyr(gy_);
-    imu_msg_.angular_velocity.z = rawgyr2radsgyr(gz_);
+    msg_.accel.angular.x = rawgyr2radsgyr(gx_);
+    msg_.accel.angular.y = rawgyr2radsgyr(gy_);
+    msg_.accel.angular.z = rawgyr2radsgyr(gz_);
 
-    pitch_ += imu_msg_.angular_velocity.x * dt;
-    roll_ += imu_msg_.angular_velocity.y * dt;
-    yaw_ += imu_msg_.angular_velocity.z * dt;
-    imu_msg_.orientation = euler2quaternion(pitch_, roll_, yaw_);
+    RCSOFTCHECK(rcl_publish(&publisher_, &msg_, NULL));
 
-    RCSOFTCHECK(rcl_publish(&publisher_, &imu_msg_, NULL));
-
+    debug_values(ax_, ay_, az_, gx_, gy_, gz_, cur_time - prev_time_);
     prev_time_ = cur_time;
   }
 }
 
 void setup() {
+  SerialDebug.begin(SERIAL_RATE, SERIAL_8N1, UART_RX, UART_TX);
+  SerialDebug.println("START");
+  
   set_microros_transports();
   rc_ = rcl_clock_init(RCL_ROS_TIME, &ros_clock_, &allocator_);
-  
-  Wire.begin(21, 22);
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(I2C_FREQ);
   imu_.initialize();
-  imu_msg_ = init_imu_msg(ros_node_name_);
+  msg_ = init_accel_msg(ros_node_name_);
   
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);  
@@ -104,8 +110,8 @@ void setup() {
   RCCHECK(rclc_publisher_init_default(
     &publisher_,
     &node_,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
-    "imu/data"));
+    ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, AccelStamped),
+    (std::string(ros_node_name_) + "/data").c_str()));
 
   // create timer_,
   RCCHECK(rclc_timer_init_default(
@@ -128,72 +134,46 @@ void loop() {
   RCSOFTCHECK(rclc_executor_spin_some(&executor_, RCL_MS_TO_NS(1)));
 }
 
-double rawacc2radsacc(const int16_t raw_acc_from_mpu6050)
-{
-  return (double)raw_acc_from_mpu6050 / 16384.0 * g_; // 1G = 16384LSB
-}
 
-double rawgyr2radsgyr(const int16_t raw_gyr_from_mpu6050)
-{
-  return deg2rad((double)raw_gyr_from_mpu6050 / 131.0); // 1deg/s = 131LSB
-}
 
-double deg2rad(const double deg)
+/*
+ * convert a to b
+ */
+double rawacc2radsacc(const int16_t raw_acc_from_mpu6050){return (double)raw_acc_from_mpu6050 / 16384.0 * g_;} // 1G = 16384LSB
+double rawgyr2radsgyr(const int16_t raw_gyr_from_mpu6050){return deg2rad((double)raw_gyr_from_mpu6050 / 131.0); }// 1deg/s = 131LSB
+double deg2rad(const double deg){return deg * PI / 180.0;}
+geometry_msgs__msg__AccelStamped init_accel_msg(const char* frame_id)
 {
-  return deg * PI / 180.0;
-}
-
-sensor_msgs__msg__Imu init_imu_msg(const char* frame_id)
-{
-  sensor_msgs__msg__Imu msg;
+  geometry_msgs__msg__AccelStamped msg;
   msg.header.frame_id.data = (char*)frame_id;
   msg.header.frame_id.size = strlen(frame_id);
-  msg.header.frame_id.capacity = imu_msg_.header.frame_id.size + 1;
-  for (size_t i = 0; i < 9; i++)
-  {
-    msg.orientation_covariance[i] = -1;
-    msg.angular_velocity_covariance[i] = -1;
-    msg.linear_acceleration_covariance[i] = -1;
-  }
+  msg.header.frame_id.capacity = msg.header.frame_id.size + 1;
 
   return msg;
 }
 
-geometry_msgs__msg__Quaternion euler2quaternion(const double pitch, const double roll, const double yaw)
-{
-  geometry_msgs__msg__Quaternion q;
-
-  double cy = cos(yaw * 0.5);
-  double sy = sin(yaw * 0.5);
-  double cp = cos(pitch * 0.5);
-  double sp = sin(pitch * 0.5);
-  double cr = cos(roll * 0.5);
-  double sr = sin(roll * 0.5);
-
-  q.w = cr * cp * cy + sr * sp * sy;
-  q.x = sr * cp * cy - cr * sp * sy;
-  q.y = cr * sp * cy + sr * cp * sy;
-  q.z = cr * cp * sy - sr * sp * cy;
-
-  return q;
-}
-
-void debug_values(const int16_t ax, const int16_t ay, const int16_t az, const int16_t gx, const int16_t gy, const int16_t gz)
-{
-  Serial.print("RAW");
-  Serial.print(ax); Serial.print(", ");
-  Serial.print(ay); Serial.print(", ");
-  Serial.print(az); Serial.print(" : ");
-  Serial.print(gx); Serial.print(", ");
-  Serial.print(gy); Serial.print(", ");
-  Serial.print(gz); 
-  Serial.println();
-  Serial.print("PREPROC");
-  Serial.print(rawacc2radsacc(ax)); Serial.print(", ");
-  Serial.print(rawacc2radsacc(ay)); Serial.print(", ");
-  Serial.print(rawacc2radsacc(az)); Serial.print(" : ");
-  Serial.print(rawgyr2radsgyr(gx)); Serial.print(", ");
-  Serial.print(rawgyr2radsgyr(gy)); Serial.print(", ");
-  Serial.print(rawgyr2radsgyr(gz)); 
-  Serial.println();
+/*
+ * debug output
+ */
+void debug_values(
+  const int16_t ax, const int16_t ay, const int16_t az, 
+  const int16_t gx, const int16_t gy, const int16_t gz, 
+  const double dt
+){
+//  SerialDebug.print("raw ");
+//  SerialDebug.print(ax); SerialDebug.print(", ");
+//  SerialDebug.print(ay); SerialDebug.print(", ");
+//  SerialDebug.print(az); SerialDebug.print(" : ");
+//  SerialDebug.print(gx); SerialDebug.print(", ");
+//  SerialDebug.print(gy); SerialDebug.print(", ");
+//  SerialDebug.print(gz); SerialDebug.print("\t");
+  SerialDebug.print("proc ");
+  SerialDebug.print(rawacc2radsacc(ax)); SerialDebug.print(", ");
+  SerialDebug.print(rawacc2radsacc(ay)); SerialDebug.print(", ");
+  SerialDebug.print(rawacc2radsacc(az)); SerialDebug.print(" : ");
+  SerialDebug.print(rawgyr2radsgyr(gx)); SerialDebug.print(", ");
+  SerialDebug.print(rawgyr2radsgyr(gy)); SerialDebug.print(", ");
+  SerialDebug.print(rawgyr2radsgyr(gz)); SerialDebug.print(", ");
+  SerialDebug.print("\tdt "); SerialDebug.print(dt); 
+  SerialDebug.println();
 }
