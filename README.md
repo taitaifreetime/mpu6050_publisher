@@ -1,4 +1,4 @@
-# MPU6050 on ESP32 as a ROS 2 NODE 
+# MPU6050 ROS 2 Node via ESP32 using ArduinoIDE 
 ## Summarize
 - ESP32 to ROS 2 publisher on a host PC connected via USB cable
 - Up to 70Hz frequency for my case
